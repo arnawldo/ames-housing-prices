@@ -1,0 +1,577 @@
+---
+title: "Advanced Regression Techniques: Ames, Iowa Housing Data"
+output: html_notebook
+---
+
+## Prerequisites
+
+```{r}
+library(tidyverse)
+library(caret)
+library(caretEnsemble)
+library(e1071)
+library(Metrics)
+library(Amelia)
+```
+
+## Load data
+
+```{r}
+ames_train <- read_csv("data/train.csv")
+ames_test <- read_csv("data/test.csv")
+```
+
+## Preprocessing
+
+Combine train and test for common preprocessing
+
+Remove `SalePrice` column
+```{r}
+sale_price_train <- ames_train %>% 
+  select(SalePrice)
+ames_train <- ames_train %>% 
+  select(-SalePrice)
+```
+
+Concatenate `train` and `test` rows
+
+```{r}
+all <- bind_rows(ames_train, ames_test)
+dim(all)
+```
+
+Convert `factor` to `chr` for preprocessing
+
+```{r}
+all <- all %>% 
+  mutate_if(is.factor, as.character)
+```
+
+
+Count number of missing values
+
+```{r}
+missmap(all, col = c("grey","steelblue"), y.cex=0.1, x.cex=0.6, legend = FALSE)
+```
+
+Lets fill some missing values 
+
+```{r}
+all <- all %>%
+  replace_na(list(
+    PoolQC = "None", # does not own pool
+    MiscFeature = "None", # no extra features worth mentioning
+    Alley = "None", # does not have alley
+    Fence = "None", # does not have fence
+    FireplaceQu = "None",# does not have fireplace
+    LotFrontage = 0, # is not connected to street
+    GarageType = "None", # does not have garage
+    GarageYrBlt = 2018, # does not have garage, assign atypical year
+    GarageQual = "None", # does not have garage
+    GarageFinish = "None", # does not have garage
+    GarageCond = "None", # does not have garage
+    GarageCars = 0, # does not have garage
+    GarageArea = 0, # does not have garage
+    BsmtFinType2 = "None", # does not have basement
+    BsmtExposure = "None", # does not have basement
+    BsmtQual = "None", # does not have basement
+    BsmtFinType1 = "None", # does not have basement
+    BsmtCond = "None", # does not have basement
+    BsmtHalfBath = 0, # does not have basement
+    BsmtFullBath = 0, # does not have basement
+    BsmtFinSF1 = 0, # does not have basement
+    BsmtFinSF2 = 0, # does not have basement
+    TotalBsmtSF = 0, # does not have basement
+    MasVnrType = "None", # does not have masonry
+    MasVnrArea = 0 # does not have masonry
+    )) 
+```
+
+
+
+
+```{r}
+missmap(all, col = c("grey","steelblue"), y.cex=0.1, x.cex=0.6, legend = FALSE)
+```
+
+```{r}
+plot_n_missing <- function(df) {
+  df %>% 
+    gather(key = "predictors", value = "values") %>% 
+    mutate(is_missing = is.na(values)) %>% 
+    filter(is_missing == TRUE) %>% 
+    group_by(predictors) %>% 
+    summarise(n_missing = sum(is_missing)) %>%
+    arrange(desc(n_missing)) %>% 
+    ggplot(aes(reorder(predictors, n_missing), n_missing)) +
+      geom_bar(stat = "identity") +
+      coord_flip() +
+      labs(x = "Predictors", 
+           y = "number of missing values")
+}
+plot_n_missing(all)
+```
+
+
+
+```{r}
+# dummyfy the data 
+dmy <- dummyVars(" ~ .", data = all)
+dmy_all <- data.frame(predict(dmy, all))
+```
+
+```{r}
+plot_n_missing(dmy_all)
+```
+
+```{r}
+missmap(dmy_all, col = c("grey","steelblue"), y.cex=0.1, x.cex=0.1, legend = FALSE)
+```
+
+
+
+*NB*:Rest of the missing values will be imputed using `knn`
+
+Seperate `train` and `test`
+```{r}
+ames_train <- dmy_all %>% 
+  filter(Id <= 1460)
+ames_test <- dmy_all %>%
+  filter(Id > 1460)
+```
+
+
+Get rid of `id` column
+```{r}
+# train Id
+ames_train_id <- ames_train %>% 
+  select(Id)
+ames_train <- ames_train %>%
+  select(- Id)
+# test Id
+ames_test_id <- ames_test %>% 
+  select(Id)
+ames_test <- ames_test %>% 
+  select(- Id)
+```
+
+
+Apply log transformation on Saleprice 
+
+```{r}
+
+sale_price_train <- sale_price_train %>% select(SalePrice) %>% log()
+
+ggplot(sale_price_train, aes(SalePrice)) +
+  geom_freqpoly() +
+  geom_rug(alpha = 3/4)
+```
+
+## Modelling
+
+### ElasticNet
+
+```{r}
+
+set.seed(77)
+
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary)
+
+ridgeGrid <-  expand.grid(lambda = c(10000, 5000, 1000, 500),
+                           alpha = 0 # ridge regression
+                           )
+
+nrow(ridgeGrid)
+
+system.time(
+ridgeFit <- train(x = ames_train, 
+                y = sale_price_train$SalePrice,
+                method = "glmnet", 
+                preProcess = c("knnImpute", "spatialSign", "center", "scale"),
+                trControl = fitControl,
+                # verbose = FALSE, 
+                # optimize mean absolute error
+                metric = "MAE",
+                # minimize MAE
+                maximize = FALSE,
+                # models to evaluate
+                tuneGrid = ridgeGrid
+                )
+)
+ridgeFit
+```
+
+```{r}
+ggplot(ridgeFit)
+```
+
+```{r}
+
+set.seed(77)
+
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary)
+
+lassoGrid <-  expand.grid(lambda = c(10000, 5000, 1000, 500),
+                           alpha = 1 # lasso regression
+                           )
+
+nrow(lassoGrid)
+
+system.time(
+lassoFit <- train(x = ames_train, 
+                y = sale_price_train$SalePrice,
+                method = "glmnet", 
+                preProcess = c("knnImpute", "spatialSign", "center", "scale"),
+                trControl = fitControl,
+                # verbose = FALSE, 
+                # optimize mean absolute error
+                metric = "MAE",
+                # minimize MAE
+                maximize = FALSE,
+                # models to evaluate
+                tuneGrid =lassoGrid
+                )
+)
+lassoFit
+```
+
+```{r}
+plot(lassoFit)
+```
+
+
+```{r}
+set.seed(77)
+
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary
+                           )
+                           
+
+plsGrid <- data.frame(ncomp = seq(1, 10, 1))
+
+nrow(plsGrid)
+
+system.time(
+plsFit <- train(x = ames_train, 
+                y = sale_price_train$SalePrice,
+                method = "pls", 
+                preProcess = c("knnImpute", "spatialSign", "center", "scale"),
+                trControl = fitControl,
+                tuneGrid = plsGrid,
+                # verbose = FALSE, 
+                # optimize mean absolute error
+                metric = "MAE",
+                # minimize MAE
+                maximize = FALSE
+                )
+)
+plsFit
+```
+
+```{r}
+ggplot(plsFit)
+```
+
+
+
+```{r}
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary)
+
+xgbGrid <-  expand.grid(nrounds = c(100, 300, 500),
+                        max_depth = 5,
+                        eta = 0.01,
+                        gamma = 0,
+                        colsample_bytree = 0.6,
+                        min_child_weight = 1,
+                        subsample = 0.6
+                        )
+                        
+nrow(xgbGrid)
+
+set.seed(77)
+system.time(
+xgbFit <- train(x = data.matrix(ames_train), 
+                y = sale_price_train$SalePrice,
+                method = "xgbTree", 
+                preProcess = c("knnImpute"),
+                trControl = fitControl,
+                metric = "MAE",
+                maximize = FALSE,
+                 ## Now specify the exact models 
+                 ## to evaluate:
+                tuneGrid = xgbGrid)
+)
+xgbFit
+```
+
+```{r}
+ggplot(xgbFit)
+```
+
+## MARS
+
+```{r}
+
+set.seed(77)
+
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary
+                           )
+                           
+
+marsGrid <- expand.grid(.degree = 1, .nprune = c(5, 10, 15, 20, 25, 30))
+
+nrow(marsGrid)
+
+system.time(
+marsFit <- train(x = ames_train, 
+                y = sale_price_train$SalePrice,
+                method = "earth", 
+                preProcess = c("knnImpute", "spatialSign", "center", "scale"),
+                trControl = fitControl,
+                tuneGrid = marsGrid,
+                # verbose = FALSE, 
+                # optimize mean absolute error
+                metric = "MAE",
+                # minimize MAE
+                maximize = FALSE
+                )
+)
+marsFit
+```
+
+```{r}
+ggplot(marsFit)
+```
+
+## Radial svm
+
+```{r}
+
+set.seed(77)
+
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary
+                           )
+                           
+
+#svmRGrid <- expand.grid(sigma = c(0, 0.005, 0.01, 0.1), C = c(0.5, 1, 10, 100, 1000))
+
+#nrow(marsGrid)
+
+system.time(
+svmRFit <- train(x = ames_train, 
+                y = sale_price_train$SalePrice,
+                method = "svmRadial", 
+                preProcess = c("knnImpute", "YeoJohnson", "center", "scale"),
+                trControl = fitControl,
+                tuneLength = 10,
+                # verbose = FALSE, 
+                # optimize mean absolute error
+                metric = "MAE",
+                # minimize MAE
+                maximize = FALSE
+                )
+)
+svmRFit
+```
+
+```{r}
+ggplot(svmRFit)
+```
+
+## comparisons
+
+```{r}
+
+set.seed(77)
+
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary)
+
+
+model_list <- caretList(
+  x = ames_train, 
+  y = sale_price_train$SalePrice,
+  trControl = fitControl,
+  # minimize absolute error
+  metric = "MAE",
+  maximize = FALSE,
+  #methodList = c("pls", "xgbTree", "svmRadial"),
+  tuneList = list(
+    pls = caretModelSpec(method = "pls",
+                         tuneGrid = data.frame(ncomp = c(6)),
+                         preProcess = c("knnImpute", "spatialSign", "center", "scale")
+                         ),
+    xgb = caretModelSpec(method = "xgbTree", 
+                         tuneGrid = expand.grid(nrounds = 2000,
+                                                max_depth = 5,
+                                                eta = 0.01,
+                                                gamma = 0,
+                                                colsample_bytree = 0.6,
+                                                min_child_weight = 1,
+                                                subsample = 0.6
+                                                ),
+                         preProcess = c("knnImpute")
+                         ),
+    svr = caretModelSpec(method = "svmRadial",
+                         tuneGrid = expand.grid(sigma = 0.00241091,  C = 1),
+                         preProcess = c("knnImpute", "YeoJohnson", "center", "scale")
+                         )
+  )
+)
+```
+
+```{r}
+results <- resamples(model_list)
+summary(results)
+dotplot(results)
+modelCor(results)
+splom(results)
+```
+
+## Build an enselmble
+
+```{r}
+# stack using glm
+set.seed(77)
+
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+stackControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary
+                           )
+
+stack_glm <- caretStack(model_list, 
+                        method = "glm",
+                        trControl = stackControl,
+                        # optimize mean absolute error
+                        metric = "MAE",
+                        # minimize MAE
+                        maximize = FALSE)
+
+stack_glm
+```
+
+```{r}
+# stack using random forest
+stack_rf <- caretStack(model_list, 
+                        method = "rf")
+
+stack_rf
+```
+
+## Make prediction
+
+```{r}
+ames_test_sale_price <- predict(stack_glm, ames_test)
+submission <- tibble(Id = ames_test_id$Id,
+                     SalePrice = exp(ames_test_sale_price))
+submission %>% write_csv("data/submission.csv")
+```

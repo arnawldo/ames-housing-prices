@@ -1,0 +1,284 @@
+---
+title: "Advanced Regression Techniques: Ames, Iowa Housing Data"
+output: html_notebook
+---
+
+## Prerequisites
+
+```{r}
+library(tidyverse)
+library(caret)
+library(e1071)
+library(doMC)
+library(Metrics)
+```
+
+## Load data
+
+```{r}
+ames_train <- read_csv("data/train.csv")
+ames_test <- read_csv("data/test.csv")
+```
+
+## Preprocessing
+
+```{r}
+glimpse(ames_train)
+```
+
+```{r}
+glimpse(ames_test)
+```
+
+## Combine train and test for common preprocessing
+
+Remove `SalePrice` column
+```{r}
+sale_price_train <- ames_train %>% 
+  select(SalePrice)
+ames_train <- ames_train %>% 
+  select(-SalePrice)
+```
+
+Concatenate `train` and `test` rows
+
+```{r}
+all <- bind_rows(ames_train, ames_test)
+dim(all)
+```
+
+Convert `factor` to `chr` for preprocessing
+
+```{r}
+all <- all %>% 
+  mutate_if(is.factor, as.character)
+```
+
+
+Count number of missing values
+
+```{r}
+plot_n_missing <- function(df) {
+  df %>% 
+    gather(key = "predictors", value = "values") %>% 
+    mutate(is_missing = is.na(values)) %>% 
+    filter(is_missing == TRUE) %>% 
+    group_by(predictors) %>% 
+    summarise(n_missing = sum(is_missing)) %>%
+    arrange(desc(n_missing)) %>% 
+    ggplot(aes(reorder(predictors, n_missing), n_missing)) +
+      geom_bar(stat = "identity") +
+      coord_flip() +
+      labs(x = "Predictors", 
+           y = "number of missing values")
+}
+plot_n_missing(all)
+```
+
+Lets fill some missing values 
+
+```{r}
+all <- all %>%
+  replace_na(list(
+    PoolQC = "None", # does not own pool
+    MiscFeature = "None", # no extra features worth mentioning
+    Alley = "None", # does not have alley
+    Fence = "None", # does not have fence
+    FireplaceQu = "None",# does not have fireplace
+    LotFrontage = 0, # is not connected to street
+    GarageType = "None", # does not have garage
+    GarageYrBlt = 1000, # does not have garage, assign atypical year
+    GarageQual = "None", # does not have garage
+    GarageFinish = "None", # does not have garage
+    GarageCond = "None", # does not have garage
+    GarageCars = 0, # does not have garage
+    GarageArea = 0, # does not have garage
+    BsmtFinType2 = "None", # does not have basement
+    BsmtExposure = "None", # does not have basement
+    BsmtQual = "None", # does not have basement
+    BsmtFinType1 = "None", # does not have basement
+    BsmtCond = "None", # does not have basement
+    BsmtHalfBath = 0, # does not have basement
+    BsmtFullBath = 0, # does not have basement
+    BsmtFinSF1 = 0, # does not have basement
+    BsmtFinSF2 = 0, # does not have basement
+    TotalBsmtSF = 0, # does not have basement
+    MasVnrType = "None", # does not have masonry
+    MasVnrArea = 0 # does not have masonry
+    )) 
+
+plot_n_missing(all)
+```
+
+*NB*:Rest of the missing values will be imputed using `knn`
+
+Convert `chr` to `factor` for use in algorithms
+
+```{r}
+all <- all %>% 
+  mutate_if(is_character, as.factor) %>% 
+  mutate(MSSubClass = as.factor(MSSubClass)) # change from int to fctr
+```
+
+Seperate `train` and `test`
+```{r}
+ames_train <- all %>% 
+  filter(Id <= 1460)
+ames_test <- all %>%
+  filter(Id > 1460)
+```
+
+
+Get rid of `id` column
+```{r}
+# train Id
+ames_train_id <- ames_train %>% 
+  select(Id)
+ames_train <- ames_train %>%
+  select(- Id)
+# test Id
+ames_test_id <- ames_test %>% 
+  select(Id)
+ames_test <- ames_test %>% 
+  select(- Id)
+```
+
+
+Apply transformation on Saleprice and convert X to `data.frame` for `caret`
+
+```{r}
+ames_train <- ames_train %>% as.data.frame()
+
+sale_price_train <- sale_price_train %>% select(SalePrice) %>% log()
+
+ggplot(sale_price_train, aes(SalePrice)) +
+  geom_freqpoly() +
+  geom_rug(alpha = 3/4)
+```
+
+
+
+## Modelling
+
+### GBM
+
+```{r}
+#registerDoMC(cores = 2)
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5)
+
+gbmGrid <-  expand.grid(interaction.depth = 3,
+                        n.trees = c(10, 200, 700, 1000), 
+                        shrinkage = 0.01,
+                        n.minobsinnode = 10
+                        )
+                        
+nrow(gbmGrid)
+
+set.seed(77)
+system.time(
+gbmFit <- train(x = ames_train, 
+                y = sale_price_train$SalePrice,
+                method = "gbm", 
+                preProcess = c("knnImpute"),
+                trControl = fitControl,
+                verbose = FALSE, 
+                 ## Now specify the exact models 
+                 ## to evaluate:
+                tuneGrid = gbmGrid)
+)
+gbmFit
+```
+
+```{r}
+ggplot(gbmFit)
+```
+
+### XGB
+
+
+```{r}
+
+maeSummary <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+   out <- mae(data$obs, data$pred)  
+   names(out) <- "MAE"
+   out
+}
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated five times
+                           repeats = 5,
+                           ## mean absolte error
+                           summaryFunction = maeSummary)
+
+xgbGrid <-  expand.grid(nrounds = c(700, 1000, 1300, 1500, 1700, 2000),
+                        max_depth = 5,
+                        eta = 0.01,
+                        gamma = 0,
+                        colsample_bytree = 0.6,
+                        min_child_weight = 1,
+                        subsample = 0.6
+                        )
+                        
+nrow(xgbGrid)
+
+set.seed(77)
+system.time(
+xgbFit <- train(x = data.matrix(ames_train), 
+                y = sale_price_train$SalePrice,
+                method = "xgbTree", 
+                preProcess = c("knnImpute"),
+                trControl = fitControl,
+                metric = "MAE",
+                maximize = FALSE,
+                 ## Now specify the exact models 
+                 ## to evaluate:
+                tuneGrid = xgbGrid)
+)
+xgbFit
+```
+
+
+```{r}
+xgbFit$results %>% 
+  ggplot(aes(nrounds, MAE)) +
+    geom_line() +
+    geom_point() +
+    geom_errorbar(aes(ymin = MAE - MAESD, ymax = MAE + MAESD))
+```
+
+```{r}
+ggplot(xgbFit)
+```
+
+```{r}
+xgbFit$resample
+```
+
+
+Make prediction
+
+```{r}
+ames_test_sale_price <- predict(xgbFit, ames_test)
+```
+
+Save results
+```{r}
+str(exp(ames_test_sale_price))
+```
+
+
+```{r}
+submission <- tibble(Id = ames_test_id$Id,
+                     SalePrice = exp(ames_test_sale_price))
+submission %>% write_csv("data/submission.csv")
+```
+
